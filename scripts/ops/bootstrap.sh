@@ -156,7 +156,7 @@ if [[ $NODE_REPOSITORY_CHANGED -eq 1 ]] || ! node_is_target_version; then
 fi
 
 if ! node_is_target_version; then
-  node_candidate=$(apt-cache policy nodejs | awk '/Candidate:/ { print $2; exit }')
+  node_candidate=$(apt-cache policy nodejs | awk '/Candidate:/ { candidate = $2 } END { print candidate }')
   if [[ $node_candidate != "${NODE_MAJOR}".* ]]; then
     fail "APT candidate for nodejs is '$node_candidate', not Node.js $NODE_MAJOR; check the NodeSource repository with: apt-cache policy nodejs"
   fi
