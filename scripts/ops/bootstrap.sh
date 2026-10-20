@@ -27,6 +27,10 @@ if [[ ${EUID} -ne 0 ]]; then
   fail 'run this script as root, for example: sudo ./scripts/ops/bootstrap.sh'
 fi
 
+# Prefer distro-managed tools over optional copies installed under /usr/local.
+export PATH="/usr/bin:/usr/sbin:/bin:/sbin:${PATH:-}"
+hash -r
+
 if [[ ! -r /etc/os-release ]]; then
   fail 'cannot identify the operating system: /etc/os-release is missing'
 fi
@@ -152,8 +156,12 @@ if [[ $NODE_REPOSITORY_CHANGED -eq 1 ]] || ! node_is_target_version; then
 fi
 
 if ! node_is_target_version; then
+  node_candidate=$(apt-cache policy nodejs | awk '/Candidate:/ { print $2; exit }')
+  if [[ $node_candidate != "${NODE_MAJOR}".* ]]; then
+    fail "APT candidate for nodejs is '$node_candidate', not Node.js $NODE_MAJOR; check the NodeSource repository with: apt-cache policy nodejs"
+  fi
   log "installing Node.js $NODE_MAJOR LTS"
-  DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends nodejs
+  DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends "nodejs=$node_candidate"
 fi
 
 node_is_target_version || fail "Node.js $NODE_MAJOR is required; found $(node --version 2>/dev/null || printf 'no Node.js')"
