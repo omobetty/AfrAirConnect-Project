@@ -1,0 +1,14 @@
+/var/log/nginx/africair.access.json {
+  daily
+  rotate 14
+  compress
+  missingok
+  notifempty
+  create 0640 www-data adm
+  sharedscripts
+  postrotate
+    if [ -s /run/nginx.pid ]; then
+      kill -USR1 "$(cat /run/nginx.pid)"
+    fi
+  endscript
+}
