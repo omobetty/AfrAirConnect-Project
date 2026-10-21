@@ -1,0 +1,16 @@
+[Unit]
+Description=AfricAir HTTP health check
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=/usr/local/sbin/africair-healthcheck
+StateDirectory=africair
+StateDirectoryMode=0750
+UMask=0027
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes

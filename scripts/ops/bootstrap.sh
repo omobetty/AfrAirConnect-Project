@@ -192,7 +192,7 @@ else
   useradd --system --user-group --home-dir "$SHARED_DIR" --no-create-home --shell /usr/sbin/nologin "$SERVICE_USER"
 fi
 
-ensure_directory "$RELEASES_DIR" "$SERVICE_USER" "$SERVICE_USER" 0750
+ensure_directory "$RELEASES_DIR" "$SERVICE_USER" "$SERVICE_USER" 0755
 ensure_directory "$SHARED_DIR" "$SERVICE_USER" "$SERVICE_USER" 0750
 
 if [[ -e $CURRENT_LINK || -L $CURRENT_LINK ]]; then

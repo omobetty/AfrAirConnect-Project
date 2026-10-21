@@ -1,0 +1,11 @@
+[Unit]
+Description=Run AfricAir health check every minute
+
+[Timer]
+OnCalendar=*-*-* *:*:00
+AccuracySec=1s
+Persistent=true
+Unit=africair-healthcheck.service
+
+[Install]
+WantedBy=timers.target
