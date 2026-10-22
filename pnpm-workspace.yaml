@@ -1,5 +1,7 @@
 packages:
   - server
 
+injectWorkspacePackages: true
+
 onlyBuiltDependencies:
   - esbuild

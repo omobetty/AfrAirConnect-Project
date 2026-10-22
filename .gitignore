@@ -1,5 +1,7 @@
 node_modules/
 dist/
+africair-*.tar.gz
+africair-*.tar.gz.sha256
 *.tsbuildinfo
 test-results/
 playwright-report/

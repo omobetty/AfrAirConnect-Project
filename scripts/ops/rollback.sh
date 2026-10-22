@@ -41,11 +41,11 @@ restore_original() {
 }
 
 if [[ ${1:-} == --help || ${1:-} == -h ]]; then
-  printf 'Usage: sudo %s\nSwitch current to the newest retained release other than the active one.\n' "$0"
+  printf 'Usage: sudo %s [web|api]\nSwitch to the newest retained release other than the active one.\n' "$0"
   exit 0
 fi
-if [[ $# -ne 0 ]]; then
-  printf 'Usage: sudo %s\n' "$0" >&2
+if [[ $# -gt 1 || ( $# -eq 1 && $1 != web && $1 != api ) ]]; then
+  printf 'Usage: sudo %s [web|api]\n' "$0" >&2
   exit 2
 fi
 if [[ $EUID -ne 0 ]]; then
@@ -55,11 +55,87 @@ fi
 readonly APP_ROOT=/opt/africair
 readonly RELEASES_DIR="$APP_ROOT/releases"
 readonly CURRENT_LINK="$APP_ROOT/current"
+readonly API_ROOT="$APP_ROOT/api"
+readonly API_RELEASES_DIR="$API_ROOT/releases"
+readonly API_CURRENT_LINK="$API_ROOT/current"
 readonly BASE_URL=${AFRICAIR_BASE_URL:-http://127.0.0.1}
+readonly TARGET_COMPONENT=${1:-web}
 
 for command_name in jq curl nginx systemctl; do
   command -v "$command_name" >/dev/null 2>&1 || fail "required command is missing: $command_name"
 done
+
+if [[ $TARGET_COMPONENT == api ]]; then
+  [[ -d $API_RELEASES_DIR && ! -L $API_RELEASES_DIR ]] || fail "API release directory is missing: $API_RELEASES_DIR"
+  [[ -L $API_CURRENT_LINK ]] || fail 'there is no current API symlink to roll back from'
+
+  ORIGINAL_API_TARGET=$(readlink -- "$API_CURRENT_LINK") || fail 'could not read current API symlink'
+  [[ $ORIGINAL_API_TARGET == releases/* && ${ORIGINAL_API_TARGET#releases/} != */* ]] || fail "API current symlink points outside its release layout: $ORIGINAL_API_TARGET"
+  ORIGINAL_API_NAME=${ORIGINAL_API_TARGET#releases/}
+  [[ -d "$API_RELEASES_DIR/$ORIGINAL_API_NAME" ]] || fail "current API release does not exist: $ORIGINAL_API_NAME"
+
+  api_release_names=()
+  for api_release_path in "$API_RELEASES_DIR"/*; do
+    [[ -d $api_release_path && ! -L $api_release_path ]] || continue
+    api_release_name=${api_release_path##*/}
+    [[ $api_release_name =~ ^[0-9]{8}T[0-9]{6}\.[0-9]{9}Z-[0-9a-f]{40}$ ]] || continue
+    api_release_names+=("$api_release_name")
+  done
+  ((${#api_release_names[@]} > 0)) || fail 'no retained API releases were found'
+  mapfile -t api_release_names < <(printf '%s\n' "${api_release_names[@]}" | LC_ALL=C sort -r)
+
+  TARGET_API_NAME=''
+  for api_release_name in "${api_release_names[@]}"; do
+    if [[ $api_release_name != "$ORIGINAL_API_NAME" ]]; then
+      TARGET_API_NAME=$api_release_name
+      break
+    fi
+  done
+  [[ -n $TARGET_API_NAME ]] || fail 'there is no previous API release to restore'
+
+  TARGET_API_DIR="$API_RELEASES_DIR/$TARGET_API_NAME"
+  [[ -f $TARGET_API_DIR/dist/index.js && -f $TARGET_API_DIR/version.json ]] || fail "previous API release is incomplete: $TARGET_API_NAME"
+  TARGET_API_COMMIT=$(jq -er '.commit | strings | select(test("^[0-9a-f]{40}$"))' "$TARGET_API_DIR/version.json") || fail 'previous API release has invalid version metadata'
+
+  nginx -t || fail 'nginx configuration test failed; API was not changed'
+  TEMP_LINK="$API_ROOT/.current.rollback.$$.$RANDOM"
+  ln -sfn -- "releases/$TARGET_API_NAME" "$TEMP_LINK" || fail 'could not create the temporary API symlink'
+  mv -Tf -- "$TEMP_LINK" "$API_CURRENT_LINK" || fail 'could not atomically switch the API symlink'
+  TEMP_LINK=''
+
+  restore_api() {
+    TEMP_LINK="$API_ROOT/.current.rollback.$$.$RANDOM"
+    ln -sfn -- "$ORIGINAL_API_TARGET" "$TEMP_LINK" || return 1
+    mv -Tf -- "$TEMP_LINK" "$API_CURRENT_LINK" || return 1
+    TEMP_LINK=''
+    systemctl restart africair-api.service || return 1
+  }
+
+  if ! systemctl restart africair-api.service; then
+    restore_api || fail 'API restart failed and automatic restoration also failed'
+    fail 'API rollback could not restart the service'
+  fi
+  if ! API_READY=$(curl --fail --silent --show-error --retry 15 --retry-connrefused --retry-delay 1 --max-time 10 "$BASE_URL/api/readyz"); then
+    restore_api || fail 'API readiness failed and automatic restoration also failed'
+    fail 'API rollback failed readiness check'
+  fi
+  if ! jq -e '.status == "ready" and .db == "connected"' <<< "$API_READY" >/dev/null; then
+    restore_api || fail 'API readiness validation failed and automatic restoration also failed'
+    fail 'API rollback did not become database-ready'
+  fi
+  if ! API_CONFIG=$(curl --fail --silent --show-error --retry 5 --retry-connrefused --retry-delay 1 --max-time 10 "$BASE_URL/api/config"); then
+    restore_api || fail 'API config check failed and automatic restoration also failed'
+    fail 'API rollback could not fetch runtime config'
+  fi
+  if ! jq -e --arg commit "$TARGET_API_COMMIT" '.commit == $commit and .storage == "database"' <<< "$API_CONFIG" >/dev/null; then
+    restore_api || fail 'API commit verification failed and automatic restoration also failed'
+    fail 'API rollback commit verification failed'
+  fi
+
+  systemctl reload nginx || fail 'API rolled back, but nginx reload failed'
+  log "API rollback succeeded: $ORIGINAL_API_NAME -> $TARGET_API_NAME ($TARGET_API_COMMIT)"
+  exit 0
+fi
 
 [[ -d $RELEASES_DIR && ! -L $RELEASES_DIR ]] || fail "release directory is missing or not a real directory: $RELEASES_DIR"
 [[ -L $CURRENT_LINK ]] || fail 'there is no current release symlink to roll back from'

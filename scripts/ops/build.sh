@@ -36,8 +36,9 @@ usage() {
   cat <<'USAGE'
 Usage: scripts/ops/build.sh <git-ref>
 
-Build a clean checkout of <git-ref>, run the quality gates, and package dist/.
-The artifact and checksum are written to the current directory by default.
+Build a clean checkout of <git-ref>, run the quality gates, and create separate
+web and API production artifacts. Artifacts and checksums go to the current
+directory by default.
 
 Environment:
   AFRICAIR_REPOSITORY      Git URL; defaults to this checkout's origin remote.
@@ -157,6 +158,7 @@ run_stage 'installing locked dependencies' 20 corepack pnpm install --frozen-loc
 run_stage 'running TypeScript checks' 30 corepack pnpm check
 run_stage 'running tests' 30 corepack pnpm test
 run_stage 'building production assets' 40 corepack pnpm build
+run_stage 'building the API' 40 corepack pnpm build:api
 
 if [[ ! -d dist ]]; then
   fail 40 'the production build completed without creating dist/'
@@ -179,29 +181,60 @@ jq -n \
   '{commit: $commit, ref: $ref, builtAt: $builtAt, builtBy: $builtBy, nodeVersion: $nodeVersion}' \
   > dist/version.json || fail 40 'could not write dist/version.json'
 
-ARTIFACT_NAME="africair-${SHORT_SHA}.tar.gz"
-CHECKSUM_NAME="${ARTIFACT_NAME}.sha256"
-ARTIFACT_PATH="$ARTIFACT_DIR/$ARTIFACT_NAME"
-CHECKSUM_PATH="$ARTIFACT_DIR/$CHECKSUM_NAME"
-RAW_ARCHIVE="$TEMP_DIR/africair.tar"
 SOURCE_DATE_EPOCH=$(git show -s --format=%ct HEAD) || fail 40 'could not determine the commit timestamp'
 
-log "creating $ARTIFACT_NAME"
-tar --sort=name --mtime="@$SOURCE_DATE_EPOCH" --owner=0 --group=0 --numeric-owner \
-  -cf "$RAW_ARCHIVE" -C "$SOURCE_DIR" dist || fail 40 'could not create the tar archive'
+package_artifact() {
+  local source_dir=$1
+  local archive_root=$2
+  local artifact_name=$3
+  local dereference=${4:-false}
+  local artifact_path="$ARTIFACT_DIR/$artifact_name"
+  local checksum_path="$ARTIFACT_DIR/$artifact_name.sha256"
+  local raw_archive="$TEMP_DIR/${artifact_name%.tar.gz}.tar"
+  local checksum
+  local tar_options=(--sort=name --mtime="@$SOURCE_DATE_EPOCH" --owner=0 --group=0 --numeric-owner)
 
-TEMP_ARCHIVE=$(mktemp "$ARTIFACT_DIR/.africair-${SHORT_SHA}.archive.XXXXXX") || fail 40 'could not create a temporary artifact file'
-gzip --no-name --stdout "$RAW_ARCHIVE" > "$TEMP_ARCHIVE" || fail 40 'gzip compression failed'
+  if [[ $dereference == true ]]; then
+    tar_options+=(--dereference --hard-dereference)
+  fi
 
-TEMP_CHECKSUM=$(mktemp "$ARTIFACT_DIR/.africair-${SHORT_SHA}.checksum.XXXXXX") || fail 40 'could not create a temporary checksum file'
-CHECKSUM=$(sha256sum "$TEMP_ARCHIVE" | awk '{ print $1 }') || fail 40 'could not calculate the artifact checksum'
-printf '%s  %s\n' "$CHECKSUM" "$ARTIFACT_NAME" > "$TEMP_CHECKSUM" || fail 40 'could not write the checksum file'
+  log "creating $artifact_name"
+  tar "${tar_options[@]}" -cf "$raw_archive" -C "$source_dir" "$archive_root" || fail 40 "could not create $artifact_name"
 
-mv -f -- "$TEMP_ARCHIVE" "$ARTIFACT_PATH" || fail 40 'could not publish the build artifact'
-TEMP_ARCHIVE=''
-mv -f -- "$TEMP_CHECKSUM" "$CHECKSUM_PATH" || fail 40 'could not publish the checksum file'
-TEMP_CHECKSUM=''
+  TEMP_ARCHIVE=$(mktemp "$ARTIFACT_DIR/.${artifact_name}.archive.XXXXXX") || fail 40 'could not create a temporary artifact file'
+  gzip --no-name --stdout "$raw_archive" > "$TEMP_ARCHIVE" || fail 40 "gzip compression failed for $artifact_name"
 
-log "artifact: $ARTIFACT_PATH"
-log "checksum: $CHECKSUM_PATH"
+  TEMP_CHECKSUM=$(mktemp "$ARTIFACT_DIR/.${artifact_name}.checksum.XXXXXX") || fail 40 'could not create a temporary checksum file'
+  checksum=$(sha256sum "$TEMP_ARCHIVE" | awk '{ print $1 }') || fail 40 "could not calculate the checksum for $artifact_name"
+  printf '%s  %s\n' "$checksum" "$artifact_name" > "$TEMP_CHECKSUM" || fail 40 "could not write the checksum for $artifact_name"
+
+  mv -f -- "$TEMP_ARCHIVE" "$artifact_path" || fail 40 "could not publish $artifact_name"
+  TEMP_ARCHIVE=''
+  mv -f -- "$TEMP_CHECKSUM" "$checksum_path" || fail 40 "could not publish $artifact_name.sha256"
+  TEMP_CHECKSUM=''
+
+  log "artifact: $artifact_path"
+  log "checksum: $checksum_path"
+}
+
+WEB_ARTIFACT_NAME="africair-${SHORT_SHA}.tar.gz"
+API_ARTIFACT_NAME="africair-api-${SHORT_SHA}.tar.gz"
+package_artifact "$SOURCE_DIR" dist "$WEB_ARTIFACT_NAME"
+
+API_PACKAGE_DIR="$TEMP_DIR/api-package"
+run_stage 'packaging API and production-only dependencies' 40 corepack pnpm --filter=@africair/api deploy --prod "$API_PACKAGE_DIR"
+
+API_ARTIFACT_ROOT="$TEMP_DIR/api-artifact"
+mkdir -p -- "$API_ARTIFACT_ROOT/api" || fail 40 'could not prepare API artifact layout'
+cp -a -- "$API_PACKAGE_DIR/." "$API_ARTIFACT_ROOT/api/" || fail 40 'could not assemble the API artifact'
+jq -n \
+  --arg commit "$COMMIT" \
+  --arg ref "$GIT_REF" \
+  --arg builtAt "$BUILT_AT" \
+  --arg builtBy "$BUILT_BY" \
+  --arg nodeVersion "$NODE_VERSION" \
+  '{commit: $commit, ref: $ref, builtAt: $builtAt, builtBy: $builtBy, nodeVersion: $nodeVersion}' \
+  > "$API_ARTIFACT_ROOT/api/version.json" || fail 40 'could not write API version metadata'
+package_artifact "$API_ARTIFACT_ROOT" api "$API_ARTIFACT_NAME" true
+
 log "commit: $COMMIT"

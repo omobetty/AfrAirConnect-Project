@@ -84,3 +84,86 @@ Oct 21 20:58:00 ip-172-31-3-50 africair-health[45715]: health check passed: http
 Oct 21 20:59:00 ip-172-31-3-50 africair-health[45728]: health check passed: http://127.0.0.1/healthz; failure counter reset
 Oct 21 21:00:00 ip-172-31-3-50 africair-health[45744]: health check passed: http://127.0.0.1/healthz; failure counter reset
 Oct 21 21:01:00 ip-172-31-3-50 africair-health[45760]: health check passed: http://127.0.0.1/healthz; failure counter reset
+10. B7. Log analysis:
+root@ip-172-31-3-50:~/AfrAirConnect-Project# BASE_URL=http://<ec2-public-ip> pnpm test:e2e
+curl -i http://<ec2-public-ip>/does-not-exist
+sudo bash scripts/ops/report.sh
+-bash: ec2-public-ip: No such file or directory
+-bash: ec2-public-ip: No such file or directory
+
+Top 10 client IPs
+        7 3.129.187.38
+        5 66.132.195.164
+        1 49.84.50.40
+        1 45.139.104.173
+        1 40.119.45.230
+        1 204.168.138.228
+        1 147.185.133.192
+10. Request counts by status class, Top 10 requested paths (query strings excluded), Requests per minute (last hour, UTC)
+
+### B8. API with PostgreSQL and systemd
+
+Install PostgreSQL and create the application role/database without putting the password in shell history:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y postgresql
+sudo -u postgres psql
+CREATE ROLE africair_app LOGIN;
+\password africair_app
+CREATE DATABASE africair OWNER africair_app;
+\q
+```
+
+Copy the non-secret settings and create root-only credential files. Put a URL-encoded database password in `database_url`, and put `SAVE10:10` in `promo_codes`:
+
+```bash
+sudo install -d -o root -g africair -m 0750 /etc/africair
+sudo install -o root -g africair -m 0640 deploy/api.env.example /etc/africair/api.env
+sudo install -d -o root -g root -m 0700 /etc/africair/secrets
+sudo sh -c 'umask 077; openssl rand -hex 24 > /etc/africair/secrets/admin_token'
+sudo install -o root -g root -m 0600 /dev/null /etc/africair/secrets/promo_codes
+sudo install -o root -g root -m 0600 /dev/null /etc/africair/secrets/database_url
+sudoedit /etc/africair/secrets/promo_codes
+sudoedit /etc/africair/secrets/database_url
+```
+
+Build and apply the migration using the secret file, then install the unit and deploy both artifacts from the same commit:
+
+```bash
+corepack pnpm build:api
+sudo env DATABASE_URL_FILE=/etc/africair/secrets/database_url /usr/bin/node server/dist/migrate.js
+sudo install -D -m 0644 deploy/systemd/africair-api.service /etc/systemd/system/africair-api.service
+sudo systemctl daemon-reload
+sudo systemctl enable africair-api.service
+bash scripts/ops/build.sh main
+sudo bash scripts/ops/deploy.sh africair-<sha>.tar.gz africair-api-<sha>.tar.gz
+```
+
+`deploy.sh` checks that the web and API artifact SHAs match, atomically switches `/opt/africair/api/current`, restarts the API, and verifies readiness, database storage, the commit, and all three file-sourced credentials before switching the web release. `pnpm deploy --prod` packages only the API runtime dependencies. `METRICS_PORT=9464` is bound to `127.0.0.1` and is not proxied by nginx.
+
+The service loads `/etc/africair/api.env` as `root:africair` mode `0640`. Secret files live under a `root:root` directory with mode `0700`; each file is `root:root` mode `0600`. `LoadCredential=` copies each file into the service's private credentials directory at startup, and the `*_FILE=%d/...` variables make the API read those copies. Prove the service identity and direct secret denial:
+
+```bash
+sudo systemctl show africair-api -p User,NoNewPrivileges,ProtectSystem
+sudo -u africair cat /etc/africair/secrets/admin_token
+```
+
+The first command should show `User=africair`, `NoNewPrivileges=yes`, and `ProtectSystem=strict`; the second should fail with permission denied. Check the live application and metrics reachability:
+
+```bash
+curl -fsS http://127.0.0.1/api/config | jq '{appEnv, storage, secrets: {database: .secrets.database, adminToken: .secrets.adminToken.source, promoCodes: .secrets.promoCodes.source}}'
+curl -fsS http://127.0.0.1/api/readyz | jq .
+curl -fsS http://127.0.0.1:9464/metrics | head
+```
+
+The status page at `http://<ec2-public-ip>/#/status` should report `staging`, PostgreSQL/database storage, and `file` for each secret source. From another machine, `curl --connect-timeout 3 http://<ec2-public-ip>:9464/metrics` should fail.
+
+To prove settings and booking behavior:
+
+1. Edit `ANNOUNCEMENT_TEXT` in `/etc/africair/api.env`, then run `sudo systemctl restart africair-api`; refresh the site and confirm the banner changed.
+2. Set `MAINTENANCE_MODE=true` in that env file and restart the service; confirm the booking control is disabled. Set it back to `false` and restart before the booking test.
+3. Confirm `/etc/africair/secrets/promo_codes` contains `SAVE10:10`, make a booking using promo code `SAVE10`, and note its reference.
+4. Open `/#/admin`, read the token locally with `sudo cat /etc/africair/secrets/admin_token`, sign in, and confirm the booking appears.
+
+`TimeoutStopSec=20s` exceeds the API's 5-second `SHUTDOWN_DELAY_MS` plus its 10-second final shutdown guard, giving it time to stop accepting work, drain requests, and close PostgreSQL before systemd force-kills it. Rotating `/etc/africair/secrets/admin_token` does not take effect immediately: systemd copied the credential when the service started. Restarting the service loads the new copy. `DATABASE_URL` also requires a restart because the database pool is created once at startup.
