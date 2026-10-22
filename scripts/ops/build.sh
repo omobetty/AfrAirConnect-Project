@@ -187,15 +187,15 @@ package_artifact() {
   local source_dir=$1
   local archive_root=$2
   local artifact_name=$3
-  local dereference=${4:-false}
+  local hard_dereference=${4:-false}
   local artifact_path="$ARTIFACT_DIR/$artifact_name"
   local checksum_path="$ARTIFACT_DIR/$artifact_name.sha256"
   local raw_archive="$TEMP_DIR/${artifact_name%.tar.gz}.tar"
   local checksum
   local tar_options=(--sort=name --mtime="@$SOURCE_DATE_EPOCH" --owner=0 --group=0 --numeric-owner)
 
-  if [[ $dereference == true ]]; then
-    tar_options+=(--dereference --hard-dereference)
+  if [[ $hard_dereference == true ]]; then
+    tar_options+=(--hard-dereference)
   fi
 
   log "creating $artifact_name"

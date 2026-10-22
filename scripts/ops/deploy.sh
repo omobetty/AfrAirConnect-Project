@@ -97,7 +97,7 @@ inspect_archive() {
   local entry_type
 
   tar -tzf "$archive" > "$staging_dir/archive.list" || return 1
-  tar -tvzf "$archive" > "$staging_dir/archive.details" || return 1
+  tar --list --verbose --numeric-owner --full-time --gzip --file "$archive" > "$staging_dir/archive.details" || return 1
 
   while IFS= read -r entry; do
     [[ $entry == "$archive_root" || $entry == "$archive_root"/* ]] || return 1
@@ -106,8 +106,49 @@ inspect_archive() {
 
   while IFS= read -r entry; do
     entry_type=${entry:0:1}
-    [[ $entry_type == d || $entry_type == - ]] || return 1
+    case "$entry_type" in
+      d|-)
+        ;;
+      l)
+        entry_path=$(awk '{ print $6 }' <<< "$entry")
+        [[ $entry == *' -> '* ]] || return 1
+        link_target=${entry#*' -> '}
+        archive_link_is_safe "$entry_path" "$link_target" "$archive_root" || return 1
+        ;;
+      *)
+        return 1
+        ;;
+    esac
   done < "$staging_dir/archive.details"
+}
+
+archive_link_is_safe() {
+  local link_path=$1
+  local link_target=$2
+  local archive_root=$3
+  local link_dir candidate component
+  local -a normalized=() components=()
+
+  [[ $link_target != /* ]] || return 1
+  link_dir=${link_path%/*}
+  candidate="$link_dir/$link_target"
+  IFS=/ read -r -a components <<< "$candidate"
+
+  for component in "${components[@]}"; do
+    case "$component" in
+      ''|.)
+        ;;
+      ..)
+        ((${#normalized[@]} > 1)) || return 1
+        unset "normalized[$((${#normalized[@]} - 1))]"
+        ;;
+      *)
+        normalized+=("$component")
+        ;;
+    esac
+  done
+
+  [[ ${normalized[0]:-} == "$archive_root" ]]
 }
 
 restore_previous() {
